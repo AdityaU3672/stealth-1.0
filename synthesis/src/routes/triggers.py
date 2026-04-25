@@ -26,7 +26,61 @@ router = APIRouter(prefix="/api/v1/triggers", tags=["triggers"])
 
 
 def _callback_url(request: Request, plugin_type: str, webhook_token: str) -> str:
+    if plugin_type == "slack":
+        return str(request.base_url).rstrip("/") + "/api/v1/triggers/webhooks/slack"
     return str(request.base_url).rstrip("/") + f"/api/v1/triggers/webhooks/{plugin_type}/{webhook_token}"
+
+
+def _slack_workspace_id(payload: dict) -> str | None:
+    candidates = [
+        payload.get("team_id"),
+        ((payload.get("authorizations") or [{}])[0]).get("team_id")
+        if isinstance(payload.get("authorizations"), list) and payload.get("authorizations")
+        else None,
+        ((payload.get("event_context") or "").split("T", 1)[1].split("-", 1)[0])
+        if isinstance(payload.get("event_context"), str) and "T" in payload.get("event_context", "")
+        else None,
+    ]
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    return None
+
+
+async def _resolve_connector(
+    db: AsyncSession,
+    plugin_type: str,
+    webhook_token: str | None,
+    payload: dict | None = None,
+) -> Connector | None:
+    if webhook_token:
+        connector_row = await db.execute(
+            select(Connector).where(
+                Connector.webhook_token == webhook_token,
+                Connector.type == plugin_type,
+                Connector.enabled.is_(True),
+            )
+        )
+        return connector_row.scalar_one_or_none()
+
+    if plugin_type != "slack" or payload is None:
+        return None
+
+    workspace_id = _slack_workspace_id(payload)
+    if not workspace_id:
+        return None
+
+    connector_row = await db.execute(
+        select(Connector)
+        .where(
+            Connector.type == "slack",
+            Connector.enabled.is_(True),
+            Connector.credentials["team_id"].astext == workspace_id,
+        )
+        .order_by(Connector.updated_at.desc(), Connector.created_at.desc())
+    )
+    return connector_row.scalars().first()
 
 
 @router.get("/config", response_model=ApiResponse[list[TriggerConnectorOption]])
@@ -173,11 +227,12 @@ async def dispatch_due_buffers(org_id: str = Depends(get_current_org)):
     return ApiResponse(data={"processed": processed})
 
 
+@router.post("/webhooks/slack")
 @router.post("/webhooks/{plugin_type}/{webhook_token}")
 async def receive_webhook(
-    plugin_type: str,
-    webhook_token: str,
     request: Request,
+    plugin_type: str = "slack",
+    webhook_token: str | None = None,
     db: AsyncSession = Depends(get_db),
     validation_token: str | None = Query(default=None, alias="validationToken"),
 ):
@@ -186,20 +241,24 @@ async def receive_webhook(
 
     webhook_logger = structlog.get_logger("webhook")
 
-    # Look up connector by webhook token to scope to the correct organization
-    connector_row = await db.execute(
-        select(Connector).where(
-            Connector.webhook_token == webhook_token,
-            Connector.type == plugin_type,
-            Connector.enabled.is_(True),
-        )
-    )
-    connector = connector_row.scalar_one_or_none()
+    payload = await request.json()
+
+    if plugin_type == "slack" and payload.get("type") == "url_verification":
+        webhook_logger.info("webhook.url_verification", plugin_type=plugin_type)
+        return {"challenge": payload.get("challenge")}
+
+    connector = await _resolve_connector(db, plugin_type, webhook_token, payload)
     if connector is None:
-        webhook_logger.warning("webhook.invalid_token", plugin_type=plugin_type)
+        if plugin_type == "slack" and not webhook_token:
+            webhook_logger.warning(
+                "webhook.slack_workspace_not_found",
+                plugin_type=plugin_type,
+                workspace_id=_slack_workspace_id(payload),
+            )
+        else:
+            webhook_logger.warning("webhook.invalid_token", plugin_type=plugin_type)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invalid webhook URL")
 
-    payload = await request.json()
     webhook_logger.info(
         "webhook.received",
         plugin_type=plugin_type,
@@ -207,9 +266,6 @@ async def receive_webhook(
         payload_type=payload.get("type"),
         event_type=payload.get("event", {}).get("type") if isinstance(payload.get("event"), dict) else None,
     )
-    if plugin_type == "slack" and payload.get("type") == "url_verification":
-        webhook_logger.info("webhook.url_verification", plugin_type=plugin_type)
-        return {"challenge": payload.get("challenge")}
 
     # Slack retries after 3s if no response — ignore retries to prevent duplicates
     if request.headers.get("x-slack-retry-num"):
