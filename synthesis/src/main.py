@@ -53,12 +53,14 @@ app.include_router(triggers_router)
 
 @app.on_event("startup")
 async def start_trigger_runtime() -> None:
-    trigger_service.start_runtime()
+    if settings.TRIGGER_RUNTIME_ENABLED:
+        trigger_service.start_runtime()
 
 
 @app.on_event("shutdown")
 async def stop_trigger_runtime() -> None:
-    await trigger_service.stop_runtime()
+    if settings.TRIGGER_RUNTIME_ENABLED:
+        await trigger_service.stop_runtime()
 
 
 @app.get("/health")

@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/ingestion_service"
+    DB_POOL_SIZE: int = 2
+    DB_MAX_OVERFLOW: int = 2
     JWT_SECRET: str = "change_me"
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
 
@@ -42,6 +44,7 @@ class Settings(BaseSettings):
     SYNTHESIS_MAX_REPRESENTATIVE_SIGNALS: int = 5
     SYNTHESIS_STALE_RUN_GRACE_SECONDS: int = 45
     INGESTION_BATCH_CONCURRENCY: int = 5
+    TRIGGER_RUNTIME_ENABLED: bool = False
 
     SLACK_CLIENT_ID: str | None = None
     SLACK_CLIENT_SECRET: str | None = None
@@ -100,11 +103,19 @@ class Settings(BaseSettings):
         "SYNTHESIS_MAX_REPRESENTATIVE_SIGNALS",
         "SYNTHESIS_STALE_RUN_GRACE_SECONDS",
         "INGESTION_BATCH_CONCURRENCY",
+        "DB_POOL_SIZE",
     )
     @classmethod
     def validate_positive_int(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("Value must be greater than 0")
+        return value
+
+    @field_validator("DB_MAX_OVERFLOW")
+    @classmethod
+    def validate_non_negative_int(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("Value must be greater than or equal to 0")
         return value
 
     @field_validator("SYNTHESIS_RETRY_CONFIDENCE_THRESHOLD")

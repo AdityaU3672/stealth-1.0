@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/ingestion_service"
+    DB_POOL_SIZE: int = 2
+    DB_MAX_OVERFLOW: int = 2
     JWT_SECRET: str = "change_me"
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
 
